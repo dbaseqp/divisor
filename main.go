@@ -258,7 +258,7 @@ func getDockerContainerAddresses() ([]string, error) {
 
 	dockerAddresses := []string{}
 	for _, container := range containers {
-		if !strings.Contains(container.Names[0], "quotient_runner_") {
+		if !strings.Contains(container.Names[0], "quotient-runner-") {
 			continue
 		}
 
