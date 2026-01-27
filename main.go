@@ -25,6 +25,23 @@ import (
 const (
 	// DefaultInterfaceName is the default name for the interface used by Divisor
 	DefaultInterfaceName = "divisor"
+	// DefaultContainerPrefix is the default prefix for container names to filter
+	DefaultContainerPrefix = "quotient-runner"
+
+	// EnvRedisAddr is the environment variable for Redis address
+	EnvRedisAddr = "REDIS_ADDR"
+	// EnvRedisPassword is the environment variable for Redis password
+	EnvRedisPassword = "REDIS_PASSWORD"
+	// EnvNumIPs is the environment variable for the number of IPs
+	EnvNumIPs = "NUM_IPS"
+	// EnvTargetSubnets is the environment variable for target subnets
+	EnvTargetSubnets = "TARGET_SUBNETS"
+	// EnvInterfaceName is the environment variable for the interface name
+	EnvInterfaceName = "INTERFACE_NAME"
+	// EnvDesiredSubnet is the environment variable for the desired subnet
+	EnvDesiredSubnet = "DESIRED_SUBNET"
+	// EnvContainerPrefix is the environment variable for the container prefix
+	EnvContainerPrefix = "CONTAINER_PREFIX"
 )
 
 var logLvels = map[string]slog.Level{
@@ -99,14 +116,14 @@ func subscribeAndListen() error {
 }
 
 func connectToRedis() (*redis.Client, error) {
-	redisAddr := os.Getenv("REDIS_ADDR")
+	redisAddr := os.Getenv(EnvRedisAddr)
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
 	}
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     redisAddr,
-		Password: os.Getenv("REDIS_PASSWORD"),
+		Password: os.Getenv(EnvRedisPassword),
 	})
 
 	if err := redisClient.Ping(context.Background()).Err(); err != nil {
@@ -117,7 +134,7 @@ func connectToRedis() (*redis.Client, error) {
 }
 
 func handleNetworkReconfiguration() error {
-	numIPs, err := strconv.Atoi(os.Getenv("NUM_IPS"))
+	numIPs, err := strconv.Atoi(os.Getenv(EnvNumIPs))
 	if err != nil {
 		return fmt.Errorf("failed to convert NUM_IPS to int: %w", err)
 	}
@@ -129,7 +146,7 @@ func handleNetworkReconfiguration() error {
 	}
 
 	// Configure NAT rules for the selected IP
-	targetSubnets := strings.Split(os.Getenv("TARGET_SUBNETS"), ",")
+	targetSubnets := strings.Split(os.Getenv(EnvTargetSubnets), ",")
 
 	dockerAddresses, err := getDockerContainerAddresses()
 	if err != nil {
@@ -146,7 +163,7 @@ func handleNetworkReconfiguration() error {
 
 // configureDivisorInterface configures the divisor interface with the number of IPs specified
 func configureDivisorInterface(numIPs int) ([]string, error) {
-	interfaceName := os.Getenv("INTERFACE_NAME")
+	interfaceName := os.Getenv(EnvInterfaceName)
 	if interfaceName == "" {
 		interfaceName = DefaultInterfaceName
 	}
@@ -185,14 +202,14 @@ func configureDivisorInterface(numIPs int) ([]string, error) {
 	var addresses []string
 	// Find and assign new IP addresses
 	for i := 0; i < numIPs; i++ {
-		ipAddr, err := getUnusedAddress(os.Getenv("DESIRED_SUBNET"))
+		ipAddr, err := getUnusedAddress(os.Getenv(EnvDesiredSubnet))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get unused address: %w", err)
 		}
 		slog.Debug("Chosen IP for all runners", "ip", ipAddr)
 
 		// Assign the new IP address
-		subnet := strings.Split(os.Getenv("DESIRED_SUBNET"), "/")[1]
+		subnet := strings.Split(os.Getenv(EnvDesiredSubnet), "/")[1]
 		mask, err := strconv.Atoi(subnet)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert subnet to int: %w", err)
@@ -265,9 +282,14 @@ func getDockerContainerAddresses() ([]string, error) {
 		return nil, fmt.Errorf("failed to list Docker containers: %w", err)
 	}
 
+	containerPrefix := os.Getenv(EnvContainerPrefix)
+	if containerPrefix == "" {
+		containerPrefix = DefaultContainerPrefix
+	}
+
 	dockerAddresses := []string{}
 	for _, container := range containers {
-		if !strings.Contains(container.Names[0], "quotient-runner-") {
+		if !strings.Contains(container.Names[0], containerPrefix) {
 			continue
 		}
 
