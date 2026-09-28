@@ -94,9 +94,12 @@ func main() {
 	if os.Getenv(EnvMode) == ModeDirect {
 		// New addresses are added before the old ones are removed, so
 		// without promote_secondaries we'd lose the new address as well
-		sysctl := "/proc/sys/net/ipv4/conf/" + os.Getenv(EnvInterfaceName) + "/promote_secondaries"
-		if v, err := os.ReadFile(sysctl); err != nil || strings.TrimSpace(string(v)) != "1" {
-			log.Fatalf("%s must be 1 in direct mode (value %q, error %v)", sysctl, strings.TrimSpace(string(v)), err)
+		promote_set := func(iface string) bool {
+			v, err := os.ReadFile("/proc/sys/net/ipv4/conf/" + iface + "/promote_secondaries")
+			return err == nil && strings.TrimSpace(string(v)) == "1"
+		}
+		if !promote_set("all") && !promote_set(os.Getenv(EnvInterfaceName)) {
+			log.Fatalf("net.ipv4.conf.%s.promote_secondaries must be 1 in direct mode", os.Getenv(EnvInterfaceName))
 		}
 		if err := handleNetworkReconfiguration(); err != nil {
 			log.Fatalf("Initial network configuration failed: %s", err)
