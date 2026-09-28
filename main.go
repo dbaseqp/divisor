@@ -42,6 +42,15 @@ const (
 	EnvDesiredSubnet = "DESIRED_SUBNET"
 	// EnvContainerPrefix is the environment variable for the container prefix
 	EnvContainerPrefix = "CONTAINER_PREFIX"
+	// EnvMode is the environment variable for the mode of operation
+	EnvMode = "DIVISOR_MODE"
+	// EnvTargetSubnetGateway is the environment variable for the target subnet gateway
+	EnvTargetSubnetGateway = "TARGET_SUBNET_GATEWAY"
+
+	// ModeSNAT is the default mode of operation, SNATting runner containers from the host
+	ModeSNAT = "snat"
+	// ModeDirect is the mode of operation that sets the IP of a runner directly
+	ModeDirect = "direct"
 )
 
 var logLvels = map[string]slog.Level{
@@ -75,6 +84,23 @@ func main() {
 	err := godotenv.Load(".env")
 	if err != nil {
 		log.Fatalf("Error loading .env file: %s", err)
+	}
+
+	if m := os.Getenv(EnvMode); m != "" && m != ModeSNAT && m != ModeDirect {
+		log.Fatalf("Invalid %s %q: must be unset, %s or %s", EnvMode, m, ModeSNAT, ModeDirect)
+	}
+
+	// In direct mode nothing else configures the interface, so do it on startup
+	if os.Getenv(EnvMode) == ModeDirect {
+		// New addresses are added before the old ones are removed, so
+		// without promote_secondaries we'd lose the new address as well
+		sysctl := "/proc/sys/net/ipv4/conf/" + os.Getenv(EnvInterfaceName) + "/promote_secondaries"
+		if v, err := os.ReadFile(sysctl); err != nil || strings.TrimSpace(string(v)) != "1" {
+			log.Fatalf("%s must be 1 in direct mode (value %q, error %v)", sysctl, strings.TrimSpace(string(v)), err)
+		}
+		if err := handleNetworkReconfiguration(); err != nil {
+			log.Fatalf("Initial network configuration failed: %s", err)
+		}
 	}
 
 	slog.Info("Starting the Divisor...")
@@ -145,9 +171,17 @@ func handleNetworkReconfiguration() error {
 		return fmt.Errorf("failed to configure divisor interface: %w", err)
 	}
 
-	// Configure NAT rules for the selected IP
 	targetSubnets := strings.Split(os.Getenv(EnvTargetSubnets), ",")
 
+	if os.Getenv(EnvMode) == ModeDirect {
+		if err := configureRoutes(targetSubnets); err != nil {
+			return fmt.Errorf("failed to configure routes: %w", err)
+		}
+		slog.Info("Finished reconfiguring network")
+		return nil
+	}
+
+	// Configure NAT rules for the selected IP
 	dockerAddresses, err := getDockerContainerAddresses()
 	if err != nil {
 		return fmt.Errorf("failed to get Docker container addresses: %w", err)
@@ -158,6 +192,37 @@ func handleNetworkReconfiguration() error {
 	}
 
 	slog.Info("Finished reconfiguring network")
+	return nil
+}
+
+// configureRoutes routes the target subnets out the divisor interface
+func configureRoutes(targetSubnets []string) error {
+	interfaceName := os.Getenv(EnvInterfaceName)
+	if interfaceName == "" {
+		interfaceName = DefaultInterfaceName
+	}
+	link, err := netlink.LinkByName(interfaceName)
+	if err != nil {
+		return fmt.Errorf("failed to get link %s by name: %w", interfaceName, err)
+	}
+
+	gateway := net.ParseIP(os.Getenv(EnvTargetSubnetGateway))
+	for _, subnet := range targetSubnets {
+		_, dst, err := net.ParseCIDR(strings.TrimSpace(subnet))
+		if err != nil {
+			return fmt.Errorf("failed to parse target subnet %q: %w", subnet, err)
+		}
+		route := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst}
+		if gateway != nil {
+			route.Gw = gateway
+			route.Flags = int(netlink.FLAG_ONLINK)
+		} else {
+			route.Scope = netlink.SCOPE_LINK
+		}
+		if err := netlink.RouteReplace(route); err != nil {
+			return fmt.Errorf("failed to add route to %s: %w", dst, err)
+		}
+	}
 	return nil
 }
 
@@ -193,9 +258,20 @@ func configureDivisorInterface(numIPs int) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list addresses: %w", err)
 	}
-	for _, addr := range addrs {
-		if err := netlink.AddrDel(link, &addr); err != nil {
-			return nil, fmt.Errorf("failed to delete address: %w", err)
+	removeOld := func() error {
+		for _, addr := range addrs {
+			if err := netlink.AddrDel(link, &addr); err != nil {
+				return fmt.Errorf("failed to delete address: %w", err)
+			}
+		}
+		return nil
+	}
+
+	// SNAT mode deletes adding to avoid requiring promote_secondaries
+	direct := os.Getenv(EnvMode) == ModeDirect
+	if !direct {
+		if err := removeOld(); err != nil {
+			return nil, err
 		}
 	}
 
@@ -225,6 +301,13 @@ func configureDivisorInterface(numIPs int) ([]string, error) {
 
 		slog.Info("Configured divisor interface", "ip", ipAddr)
 		addresses = append(addresses, ipAddr)
+	}
+
+	// Direct mode adds before deleting to avoid temporarily dropping the routes
+	if direct {
+		if err := removeOld(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Bring the interface up
