@@ -89,6 +89,8 @@ CONTAINER_PREFIX=quotient-runner
 | `TARGET_SUBNETS` | Yes | - | Comma-separated list of destination subnets |
 | `INTERFACE_NAME` | No | `divisor` | Name for the network interface |
 | `CONTAINER_PREFIX` | No | `quotient-runner` | Prefix to identify runner containers |
+| `DIVISOR_MODE` | No | `snat` | Mode of operation, see [direct mode](#direct-mode) |
+| `TARGET_SUBNET_GATEWAY` | No | - | Direct mode: gateway for `TARGET_SUBNETS` (unset: on-link) |
 ### Variable Details
 
 #### REDIS_ADDR
@@ -238,6 +240,12 @@ To run Quotient without IP rotation, comment out or remove the divisor service f
 #     dockerfile: Dockerfile
 #   ...
 ```
+
+### Direct Mode
+
+With `DIVISOR_MODE=direct`, Divisor expects to run in a runner's network namespace and sets the address directly on `INTERFACE_NAME`. Each runner must have its own divisor attached. Use this mode if you want to run on Kubernetes, or otherwise don't want to use the SNAT mode.
+
+Requires `net.ipv4.conf.<INTERFACE_NAME>.promote_secondaries=1`. Divisor needs an IP to ping from when ensuring an address is unused, and in direct mode there's no existing IP to rely on other than the previously used scoring IP, so we add the new IP before removing the old one.
 
 ---
 
