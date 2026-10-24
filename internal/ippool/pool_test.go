@@ -1,4 +1,4 @@
-package main
+package ippool
 
 import (
 	"math/rand"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseDesiredSubnets_SingleAndMultiple(t *testing.T) {
-	subnets, err := parseDesiredSubnets("10.192.0.0/10")
+	subnets, err := ParseDesiredSubnets("10.192.0.0/10")
 	if err != nil {
 		t.Fatalf("unexpected error for single CIDR: %v", err)
 	}
@@ -15,7 +15,7 @@ func TestParseDesiredSubnets_SingleAndMultiple(t *testing.T) {
 		t.Fatalf("unexpected parsed subnet: %+v", subnets)
 	}
 
-	multi, err := parseDesiredSubnets(" 10.10.0.0/16 , 172.16.50.0/24,192.168.200.5/32 ")
+	multi, err := ParseDesiredSubnets(" 10.10.0.0/16 , 172.16.50.0/24,192.168.200.5/32 ")
 	if err != nil {
 		t.Fatalf("unexpected error for multiple CIDRs: %v", err)
 	}
@@ -39,25 +39,25 @@ func TestParseDesiredSubnets_Errors(t *testing.T) {
 		"2001:db8::/32",
 	}
 	for _, tc := range cases {
-		if _, err := parseDesiredSubnets(tc); err == nil {
+		if _, err := ParseDesiredSubnets(tc); err == nil {
 			t.Errorf("expected error for %q, got nil", tc)
 		}
 	}
 }
 
 func TestPickRandomAddress_AcrossMultipleSubnets(t *testing.T) {
-	subnets, err := parseDesiredSubnets("10.10.0.0/16,172.16.50.0/24,192.168.200.42/32")
+	subnets, err := ParseDesiredSubnets("10.10.0.0/16,172.16.50.0/24,192.168.200.42/32")
 	if err != nil {
-		t.Fatalf("parseDesiredSubnets failed: %v", err)
+		t.Fatalf("ParseDesiredSubnets failed: %v", err)
 	}
 
 	rng := rand.New(rand.NewSource(42))
 	seenSubnet := make(map[string]bool)
 
 	for i := 0; i < 200; i++ {
-		ipNet, err := pickRandomAddress(subnets, rng)
+		ipNet, err := PickRandomAddress(subnets, rng)
 		if err != nil {
-			t.Fatalf("pickRandomAddress failed on iteration %d: %v", i, err)
+			t.Fatalf("PickRandomAddress failed on iteration %d: %v", i, err)
 		}
 
 		matched := false
@@ -79,60 +79,24 @@ func TestPickRandomAddress_AcrossMultipleSubnets(t *testing.T) {
 }
 
 func TestPickRandomAddress_ExcludesNetworkAndBroadcast(t *testing.T) {
-	subnets, err := parseDesiredSubnets("192.168.1.0/30")
+	subnets, err := ParseDesiredSubnets("192.168.1.0/30")
 	if err != nil {
-		t.Fatalf("parseDesiredSubnets failed: %v", err)
+		t.Fatalf("ParseDesiredSubnets failed: %v", err)
 	}
-	if cap := totalSubnetsCapacity(subnets); cap != 2 {
+	if cap := TotalSubnetsCapacity(subnets); cap != 2 {
 		t.Fatalf("expected capacity 2 for /30, got %d", cap)
 	}
 
 	rng := rand.New(rand.NewSource(1))
 	for i := 0; i < 50; i++ {
-		ipNet, err := pickRandomAddress(subnets, rng)
+		ipNet, err := PickRandomAddress(subnets, rng)
 		if err != nil {
-			t.Fatalf("pickRandomAddress failed: %v", err)
+			t.Fatalf("PickRandomAddress failed: %v", err)
 		}
 		got := ipNet.IP.String()
 		if got == "192.168.1.0" || got == "192.168.1.3" {
 			t.Fatalf("picked network or broadcast address %s in /30", got)
 		}
-	}
-}
-
-func TestGetDesiredSubnetsEnv(t *testing.T) {
-	t.Setenv(EnvDesiredSubnet, "10.0.0.0/24")
-	t.Setenv(EnvDesiredSubnets, "")
-	if got := getDesiredSubnetsEnv(); got != "10.0.0.0/24" {
-		t.Fatalf("got %q, want 10.0.0.0/24", got)
-	}
-
-	t.Setenv(EnvDesiredSubnets, "10.1.0.0/24,10.2.0.0/24")
-	if got := getDesiredSubnetsEnv(); got != "10.1.0.0/24,10.2.0.0/24" {
-		t.Fatalf("got %q, want 10.1.0.0/24,10.2.0.0/24", got)
-	}
-}
-
-func TestGetDesiredSubnetsEnv_WhitespaceAndFallback(t *testing.T) {
-	cases := []struct {
-		name     string
-		singular string
-		plural   string
-		want     string
-	}{
-		{name: "plural whitespace falls back", singular: "10.0.0.0/24", plural: "   ", want: "10.0.0.0/24"},
-		{name: "singular is trimmed", singular: "  10.0.0.0/8  ", plural: "", want: "10.0.0.0/8"},
-		{name: "plural is trimmed and wins", singular: "10.0.0.0/24", plural: " 10.1.0.0/24,10.2.0.0/24 ", want: "10.1.0.0/24,10.2.0.0/24"},
-		{name: "both empty", singular: "", plural: "", want: ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(EnvDesiredSubnet, tc.singular)
-			t.Setenv(EnvDesiredSubnets, tc.plural)
-			if got := getDesiredSubnetsEnv(); got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
 
@@ -150,9 +114,9 @@ func TestParseDesiredSubnets_CanonicalizesHostAddresses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
-			got, err := parseDesiredSubnets(tc.in)
+			got, err := ParseDesiredSubnets(tc.in)
 			if err != nil {
-				t.Fatalf("parseDesiredSubnets: %v", err)
+				t.Fatalf("ParseDesiredSubnets: %v", err)
 			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("got %d subnets (%v), want %d", len(got), got, len(tc.want))
@@ -186,11 +150,11 @@ func TestTotalSubnetsCapacity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.cidrs, func(t *testing.T) {
-			subnets, err := parseDesiredSubnets(tc.cidrs)
+			subnets, err := ParseDesiredSubnets(tc.cidrs)
 			if err != nil {
-				t.Fatalf("parseDesiredSubnets: %v", err)
+				t.Fatalf("ParseDesiredSubnets: %v", err)
 			}
-			if got := totalSubnetsCapacity(subnets); got != tc.want {
+			if got := TotalSubnetsCapacity(subnets); got != tc.want {
 				t.Fatalf("capacity = %d, want %d", got, tc.want)
 			}
 		})
@@ -210,9 +174,9 @@ func TestPickRandomAddress_StaysInUsableSet(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.cidr, func(t *testing.T) {
-			subnets, err := parseDesiredSubnets(tc.cidr)
+			subnets, err := ParseDesiredSubnets(tc.cidr)
 			if err != nil {
-				t.Fatalf("parseDesiredSubnets: %v", err)
+				t.Fatalf("ParseDesiredSubnets: %v", err)
 			}
 			allowed := make(map[string]bool, len(tc.usable))
 			for _, ip := range tc.usable {
@@ -221,7 +185,7 @@ func TestPickRandomAddress_StaysInUsableSet(t *testing.T) {
 			seen := make(map[string]bool, len(tc.usable))
 			rng := rand.New(rand.NewSource(1))
 			for i := 0; i < 200; i++ {
-				gotNet, err := pickRandomAddress(subnets, rng)
+				gotNet, err := PickRandomAddress(subnets, rng)
 				if err != nil {
 					t.Fatalf("pick %d: %v", i, err)
 				}
@@ -245,15 +209,15 @@ func TestPickRandomAddress_StaysInUsableSet(t *testing.T) {
 }
 
 func TestPickRandomAddress_DeterministicForSeed(t *testing.T) {
-	subnets, err := parseDesiredSubnets("10.0.0.0/24,192.0.2.0/30")
+	subnets, err := ParseDesiredSubnets("10.0.0.0/24,192.0.2.0/30")
 	if err != nil {
-		t.Fatalf("parseDesiredSubnets: %v", err)
+		t.Fatalf("ParseDesiredSubnets: %v", err)
 	}
 	collect := func(seed int64) []string {
 		rng := rand.New(rand.NewSource(seed))
 		got := make([]string, 0, 16)
 		for i := 0; i < 16; i++ {
-			ipNet, err := pickRandomAddress(subnets, rng)
+			ipNet, err := PickRandomAddress(subnets, rng)
 			if err != nil {
 				t.Fatalf("pick %d: %v", i, err)
 			}
@@ -274,17 +238,17 @@ func TestPickRandomAddress_DeterministicForSeed(t *testing.T) {
 
 func TestPickRandomAddress_RejectsUnusablePools(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	if _, err := pickRandomAddress(nil, rng); err == nil {
+	if _, err := PickRandomAddress(nil, rng); err == nil {
 		t.Fatal("expected error for no subnets")
 	}
 
 	for _, cidr := range []string{"0.0.0.0/0", "0.0.0.0/1", "10.0.0.0/0"} {
 		t.Run(cidr, func(t *testing.T) {
-			subnets, err := parseDesiredSubnets(cidr)
+			subnets, err := ParseDesiredSubnets(cidr)
 			if err != nil {
-				t.Fatalf("parseDesiredSubnets: %v", err)
+				t.Fatalf("ParseDesiredSubnets: %v", err)
 			}
-			if _, err := pickRandomAddress(subnets, rng); err == nil {
+			if _, err := PickRandomAddress(subnets, rng); err == nil {
 				t.Fatal("expected unsupported prefix error")
 			}
 		})
@@ -302,7 +266,7 @@ func TestGetUnusedAddress_FailsWhenPoolIsExhausted(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.cidr, func(t *testing.T) {
-			subnets, err := parseDesiredSubnets(tc.cidr)
+			subnets, err := ParseDesiredSubnets(tc.cidr)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -310,7 +274,7 @@ func TestGetUnusedAddress_FailsWhenPoolIsExhausted(t *testing.T) {
 			for _, ip := range tc.assigned {
 				assigned[ip] = true
 			}
-			_, err = getUnusedAddress(subnets, assigned)
+			_, err = GetUnusedAddress(subnets, assigned)
 			if err == nil || !strings.Contains(err.Error(), "unable to find an unused IP address") {
 				t.Fatalf("got %v", err)
 			}
@@ -319,30 +283,16 @@ func TestGetUnusedAddress_FailsWhenPoolIsExhausted(t *testing.T) {
 }
 
 func TestGetUnusedAddress_RejectsEmptyOrUnsupportedPool(t *testing.T) {
-	if _, err := getUnusedAddress(nil, map[string]bool{}); err == nil || !strings.Contains(err.Error(), "no desired subnets") {
+	if _, err := GetUnusedAddress(nil, map[string]bool{}); err == nil || !strings.Contains(err.Error(), "no desired subnets") {
 		t.Fatalf("empty pool: got %v", err)
 	}
 
-	subnets, err := parseDesiredSubnets("0.0.0.0/0")
+	subnets, err := ParseDesiredSubnets("0.0.0.0/0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = getUnusedAddress(subnets, map[string]bool{})
+	_, err = GetUnusedAddress(subnets, map[string]bool{})
 	if err == nil || !strings.Contains(err.Error(), "unsupported prefix") {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestHandleNetworkReconfiguration_RejectsNonNumericNumIPs(t *testing.T) {
-	t.Setenv(EnvNumIPs, "many")
-	t.Setenv(EnvDesiredSubnet, "192.0.2.0/24")
-	t.Setenv(EnvDesiredSubnets, "")
-	t.Setenv(EnvTargetSubnets, "10.0.0.0/8")
-	t.Setenv(EnvMode, ModeSNAT)
-	t.Setenv(EnvInterfaceName, "divisor-test-unused")
-
-	err := handleNetworkReconfiguration()
-	if err == nil || !strings.Contains(err.Error(), "NUM_IPS") {
 		t.Fatalf("got %v", err)
 	}
 }
