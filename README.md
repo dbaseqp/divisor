@@ -8,6 +8,7 @@ Divisor is an optional component that provides IP rotation for Quotient runner c
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
+- [Project layout](#project-layout)
 - [How It Works](#how-it-works)
 - [Deployment](#deployment)
 - [Troubleshooting](#troubleshooting)
@@ -160,6 +161,17 @@ The name assigned to the network interface created by Divisor. The default `divi
 
 ---
 
+## Project layout
+
+`cmd/divisor` is the process entry point. It loads `.env`, checks `DIVISOR_MODE`, wires an event source to network reconfiguration, and runs. The rest of the program lives under `internal/`:
+
+- `config` reads environment variables
+- `ippool` chooses addresses from `DESIRED_SUBNET`
+- `network` rotates the interface and installs SNAT rules or direct-mode routes
+- `events` subscribes to Quotient's Redis `events` channel
+
+Build with `go build -o divisor ./cmd/divisor`.
+
 ## How It Works
 
 ### Initialization
@@ -259,7 +271,7 @@ Requires `net.ipv4.conf.<INTERFACE_NAME>.promote_secondaries=1`. Divisor needs a
 **Check submodule initialization:**
 ```bash
 ls -la divisor/
-# Should contain Dockerfile, main.go, etc.
+# Should contain Dockerfile, cmd/divisor/main.go, etc.
 
 # If empty, initialize:
 git submodule update --init --recursive

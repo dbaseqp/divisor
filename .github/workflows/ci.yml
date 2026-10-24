@@ -50,4 +50,4 @@ jobs:
         run: go test -count=1 -race ./...
 
       - name: Build
-        run: go build -trimpath -o /dev/null .
+        run: go build -trimpath -o /dev/null ./cmd/divisor
