@@ -15,16 +15,9 @@ concurrency:
 
 jobs:
   test:
-    name: Go ${{ matrix.go-version }}
+    name: Go 1.27.x
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        # go.mod declares 1.23. The image in the Dockerfile builds with 1.25.
-        go-version:
-          - 1.23.x
-          - 1.25.x
     env:
       GOFLAGS: -mod=readonly
     steps:
@@ -34,7 +27,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: 1.27.x
           cache: true
           cache-dependency-path: go.sum
 
