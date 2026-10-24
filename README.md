@@ -92,6 +92,9 @@ CONTAINER_PREFIX=quotient-runner
 | `CONTAINER_PREFIX` | No | `quotient-runner` | Prefix to identify runner containers |
 | `DIVISOR_MODE` | No | `snat` | Mode of operation, see [direct mode](#direct-mode) |
 | `TARGET_SUBNET_GATEWAY` | No | - | Direct mode: gateway for `TARGET_SUBNETS` (unset: on-link) |
+| `QUOTIENT_BACKEND` | No | `redis` | Event source: `redis` or `nats` |
+| `NATS_URL` | No | `nats://localhost:4222` | Core NATS server URL, used when `QUOTIENT_BACKEND=nats` |
+| `NATS_ROUND_CLOSED_SUBJECT` | No | `scoring.rounds.closed` | Subject that carries one closed-round message |
 ### Variable Details
 
 #### REDIS_ADDR
@@ -159,6 +162,33 @@ TARGET_SUBNETS=10.0.0.0/8
 
 The name assigned to the network interface created by Divisor. The default `divisor` works for most deployments.
 
+#### QUOTIENT_BACKEND
+
+Selects where Divisor hears that a scoring round closed.
+
+- `redis` (the default) subscribes to the Redis `events` channel and reconfigures on a payload of exactly `round_finish`. Other payloads are ignored. `REDIS_ADDR` defaults to `localhost:6379`. `REDIS_PASSWORD` is sent as the Redis password when set.
+- `nats` connects to core NATS (not JetStream) and reconfigures on each valid message. Anything else is rejected at startup.
+
+```bash
+QUOTIENT_BACKEND=nats
+NATS_URL=nats://localhost:4222
+NATS_ROUND_CLOSED_SUBJECT=scoring.rounds.closed
+```
+
+#### NATS_URL
+
+Used only in NATS mode. The URL is passed to the NATS client as-is, so user info and tokens belong in the URL (`nats://user:password@host:4222` or `nats://token@host:4222`). There is no separate username, token, or credentials-file variable.
+
+#### NATS_ROUND_CLOSED_SUBJECT
+
+Each message on this subject is one closed round. The payload is JSON:
+
+```json
+{"round_id": "6f1c0c3e-9b1a-4e0a-9c2a-1b7e5d4a8c11", "closed_at": "2026-10-24T22:00:00Z"}
+```
+
+`round_id` is a UUID string and `closed_at` is RFC3339. Quotient publishes one message when a round reaches completed, and at most once. Divisor does not inspect the round. The message arriving runs the same reconfiguration as Redis `round_finish`. The body is decoded leniently: `round_id` is added to the log when it is present, and a body that is missing fields or is not JSON is logged and still reconfigures. It does not stop the listener.
+
 ---
 
 ## Project layout
@@ -168,7 +198,7 @@ The name assigned to the network interface created by Divisor. The default `divi
 - `config` reads environment variables
 - `ippool` chooses addresses from `DESIRED_SUBNET`
 - `network` rotates the interface and installs SNAT rules or direct-mode routes
-- `events` subscribes to Quotient's Redis `events` channel
+- `events` subscribes to Redis `round_finish` or a NATS round-closed subject. Both call the same reconfiguration function.
 
 Build with `go build -o divisor ./cmd/divisor`.
 
@@ -176,14 +206,14 @@ Build with `go build -o divisor ./cmd/divisor`.
 
 ### Initialization
 
-1. Divisor connects to Redis and subscribes to the `events` channel
+1. Divisor subscribes to round-closed notifications. The default is the Redis `events` channel. With `QUOTIENT_BACKEND=nats` it is the NATS subject `scoring.rounds.closed`.
 2. Creates (or recreates) the network interface specified by `INTERFACE_NAME`
 3. Assigns `NUM_IPS` random addresses from `DESIRED_SUBNET` to the interface
 4. Each IP is validated via ICMP ping to ensure it's not already in use
 
 ### Round-Based Rotation
 
-1. Quotient publishes a `round_finish` event to Redis at the end of each scoring round
+1. Quotient signals the end of a scoring round. Redis mode uses the payload `round_finish`. NATS mode uses one JSON message, `{"round_id": "<uuid>", "closed_at": "<RFC3339>"}`, published once when the round reaches completed.
 2. Divisor receives the event and triggers reconfiguration
 3. New random IPs are selected and assigned to the interface
 4. NAT rules are updated for all runner containers
