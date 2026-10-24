@@ -62,15 +62,15 @@ INTERFACE_NAME=divisor
 CONTAINER_PREFIX=quotient-runner
 ```
 
-### Configuration with Multiple Target Subnets
+### Configuration with Multiple Subnets
 
-If your competition infrastructure spans multiple subnets:
+If your competition infrastructure or source IP ranges span multiple subnets:
 
 ```bash
 REDIS_ADDR=quotient_redis:6379
 REDIS_PASSWORD=your_redis_password
 NUM_IPS=10
-DESIRED_SUBNET=192.168.200.0/24
+DESIRED_SUBNET=10.192.0.0/16,192.168.200.0/24
 TARGET_SUBNETS=10.100.0.0/16,10.200.0.0/16,172.16.0.0/12
 INTERFACE_NAME=divisor
 CONTAINER_PREFIX=quotient-runner
@@ -85,7 +85,7 @@ CONTAINER_PREFIX=quotient-runner
 | `REDIS_ADDR` | Yes | `localhost:6379` | Address of the Quotient Redis server |
 | `REDIS_PASSWORD` | Yes | - | Password for Redis authentication |
 | `NUM_IPS` | Yes | - | Number of IP addresses to create on the interface |
-| `DESIRED_SUBNET` | Yes | - | CIDR subnet from which to allocate IPs |
+| `DESIRED_SUBNET` | Yes | - | Comma-separated CIDR subnet(s) from which to allocate IPs (`DESIRED_SUBNETS` is also supported) |
 | `TARGET_SUBNETS` | Yes | - | Comma-separated list of destination subnets |
 | `INTERFACE_NAME` | No | `divisor` | Name for the network interface |
 | `CONTAINER_PREFIX` | No | `quotient-runner` | Prefix to identify runner containers |
@@ -123,10 +123,10 @@ NUM_IPS=10
 
 #### DESIRED_SUBNET
 
-The CIDR subnet from which Divisor will randomly select IP addresses. Choose a subnet that:
-- Does not conflict with your existing network infrastructure
-- Does not overlap with team networks
-- Has enough addresses for `NUM_IPS`
+One or more comma-separated CIDR subnets from which Divisor will randomly select IP addresses (`DESIRED_SUBNETS` is also accepted as an alias). Choose subnet(s) that:
+- Do not conflict with your existing network infrastructure
+- Do not overlap with team networks
+- Have enough total addresses for `NUM_IPS`
 
 ```bash
 # Large private subnet
@@ -134,6 +134,9 @@ DESIRED_SUBNET=10.192.0.0/10
 
 # Smaller dedicated subnet
 DESIRED_SUBNET=192.168.200.0/24
+
+# Multiple non-contiguous CIDR blocks
+DESIRED_SUBNET=10.192.0.0/16,172.16.50.0/24,192.168.200.0/24
 ```
 
 #### TARGET_SUBNETS
