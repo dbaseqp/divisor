@@ -61,6 +61,45 @@ func TestValidateMode(t *testing.T) {
 	}
 }
 
+func TestBackendSelection(t *testing.T) {
+	t.Setenv(EnvQuotientBackend, "")
+	t.Setenv(EnvNATSURL, "")
+	t.Setenv(EnvNATSRoundClosedSubject, "")
+	cfg := Load()
+	if cfg.Backend != BackendRedis {
+		t.Fatalf("backend = %q, want redis", cfg.Backend)
+	}
+	if err := cfg.ValidateBackend(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NATSURL != DefaultNATSURL {
+		t.Fatalf("nats url = %q", cfg.NATSURL)
+	}
+	if cfg.NATSSubject != DefaultNATSSubject {
+		t.Fatalf("nats subject = %q", cfg.NATSSubject)
+	}
+
+	t.Setenv(EnvQuotientBackend, BackendNATS)
+	t.Setenv(EnvNATSURL, "nats://nats.internal:4222")
+	t.Setenv(EnvNATSRoundClosedSubject, "custom.rounds")
+	cfg = Load()
+	if cfg.Backend != BackendNATS || cfg.NATSURL != "nats://nats.internal:4222" || cfg.NATSSubject != "custom.rounds" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	if err := cfg.ValidateBackend(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, backend := range []string{"NATS", "redis ", "kafka"} {
+		t.Run(backend, func(t *testing.T) {
+			err := (Config{Backend: backend}).ValidateBackend()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
 func TestLoadLeavesInterfaceNameUnset(t *testing.T) {
 	t.Setenv(EnvInterfaceName, "")
 	t.Setenv(EnvContainerPrefix, "")
