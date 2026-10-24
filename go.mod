@@ -1,6 +1,6 @@
 module divisor
 
-go 1.23.0
+go 1.27.0
 
 require (
 	github.com/docker/docker v27.4.1+incompatible
