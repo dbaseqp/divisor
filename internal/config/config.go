@@ -16,6 +16,10 @@ const (
 	DefaultContainerPrefix = "quotient-runner"
 	// DefaultRedisAddr is used when REDIS_ADDR is unset.
 	DefaultRedisAddr = "localhost:6379"
+	// DefaultNATSURL is used when NATS_URL is unset.
+	DefaultNATSURL = "nats://localhost:4222"
+	// DefaultNATSSubject is the core NATS subject for one closed scoring round.
+	DefaultNATSSubject = "scoring.rounds.closed"
 
 	// EnvRedisAddr is the environment variable for Redis address.
 	EnvRedisAddr = "REDIS_ADDR"
@@ -37,11 +41,22 @@ const (
 	EnvMode = "DIVISOR_MODE"
 	// EnvTargetSubnetGateway is the environment variable for the target subnet gateway.
 	EnvTargetSubnetGateway = "TARGET_SUBNET_GATEWAY"
+	// EnvQuotientBackend selects the event source: redis or nats.
+	EnvQuotientBackend = "QUOTIENT_BACKEND"
+	// EnvNATSURL is the environment variable for the core NATS server URL.
+	EnvNATSURL = "NATS_URL"
+	// EnvNATSRoundClosedSubject is the environment variable for the round-closed subject.
+	EnvNATSRoundClosedSubject = "NATS_ROUND_CLOSED_SUBJECT"
 
 	// ModeSNAT is the default mode of operation, SNATting runner containers from the host.
 	ModeSNAT = "snat"
 	// ModeDirect is the mode of operation that sets the IP of a runner directly.
 	ModeDirect = "direct"
+
+	// BackendRedis subscribes to Quotient's Redis events channel.
+	BackendRedis = "redis"
+	// BackendNATS subscribes to a core NATS round-closed subject.
+	BackendNATS = "nats"
 )
 
 // Config is a snapshot of the process environment.
@@ -57,6 +72,9 @@ type Config struct {
 	DesiredSubnets      string
 	ContainerPrefix     string
 	TargetSubnetGateway string
+	Backend             string
+	NATSURL             string
+	NATSSubject         string
 }
 
 // Load reads the current environment. It does not validate the mode.
@@ -64,6 +82,18 @@ func Load() Config {
 	redisAddr := os.Getenv(EnvRedisAddr)
 	if redisAddr == "" {
 		redisAddr = DefaultRedisAddr
+	}
+	backend := os.Getenv(EnvQuotientBackend)
+	if backend == "" {
+		backend = BackendRedis
+	}
+	natsURL := os.Getenv(EnvNATSURL)
+	if natsURL == "" {
+		natsURL = DefaultNATSURL
+	}
+	natsSubject := os.Getenv(EnvNATSRoundClosedSubject)
+	if natsSubject == "" {
+		natsSubject = DefaultNATSSubject
 	}
 	return Config{
 		Mode:                os.Getenv(EnvMode),
@@ -75,6 +105,9 @@ func Load() Config {
 		DesiredSubnets:      desiredSubnets(),
 		ContainerPrefix:     os.Getenv(EnvContainerPrefix),
 		TargetSubnetGateway: os.Getenv(EnvTargetSubnetGateway),
+		Backend:             backend,
+		NATSURL:             natsURL,
+		NATSSubject:         natsSubject,
 	}
 }
 
@@ -85,6 +118,16 @@ func (c Config) ValidateMode() error {
 		return fmt.Errorf("Invalid %s %q: must be unset, %s or %s", EnvMode, m, ModeSNAT, ModeDirect)
 	}
 	return nil
+}
+
+// ValidateBackend reports an invalid QUOTIENT_BACKEND. Load defaults an unset value to redis.
+func (c Config) ValidateBackend() error {
+	switch c.Backend {
+	case BackendRedis, BackendNATS:
+		return nil
+	default:
+		return fmt.Errorf("Invalid %s %q: must be %s or %s", EnvQuotientBackend, c.Backend, BackendRedis, BackendNATS)
+	}
 }
 
 // InterfaceNameOrDefault applies the default interface name at the use site.

@@ -46,6 +46,9 @@ func main() {
 	if err := cfg.ValidateMode(); err != nil {
 		log.Fatalf("%s", err)
 	}
+	if err := cfg.ValidateBackend(); err != nil {
+		log.Fatalf("%s", err)
+	}
 
 	// In direct mode nothing else configures the interface, so do it on startup.
 	if cfg.Mode == config.ModeDirect {
@@ -60,7 +63,10 @@ func main() {
 	}
 
 	slog.Info("Starting the Divisor...")
-	var source events.Source = events.NewRedis()
+	source, err := events.Open(cfg)
+	if err != nil {
+		log.Fatalf("%s", err)
+	}
 	for {
 		if err := source.Listen(context.Background(), network.Reconfigure); err != nil {
 			slog.Error("main loop errored out", "error", err)
