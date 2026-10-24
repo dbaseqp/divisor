@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
@@ -38,8 +39,10 @@ const (
 	EnvTargetSubnets = "TARGET_SUBNETS"
 	// EnvInterfaceName is the environment variable for the interface name
 	EnvInterfaceName = "INTERFACE_NAME"
-	// EnvDesiredSubnet is the environment variable for the desired subnet
+	// EnvDesiredSubnet is the environment variable for the desired subnet(s)
 	EnvDesiredSubnet = "DESIRED_SUBNET"
+	// EnvDesiredSubnets is the plural alias for EnvDesiredSubnet
+	EnvDesiredSubnets = "DESIRED_SUBNETS"
 	// EnvContainerPrefix is the environment variable for the container prefix
 	EnvContainerPrefix = "CONTAINER_PREFIX"
 	// EnvMode is the environment variable for the mode of operation
@@ -278,31 +281,41 @@ func configureDivisorInterface(numIPs int) ([]string, error) {
 		}
 	}
 
+	desiredSubnets, err := parseDesiredSubnets(getDesiredSubnetsEnv())
+	if err != nil {
+		return nil, err
+	}
+
+	totalCapacity := totalSubnetsCapacity(desiredSubnets)
+	if numIPs > totalCapacity {
+		return nil, fmt.Errorf("requested NUM_IPS (%d) exceeds total usable addresses (%d) in DESIRED_SUBNET", numIPs, totalCapacity)
+	}
+
+	assigned := make(map[string]bool, len(addrs)+numIPs)
+	if direct {
+		for _, addr := range addrs {
+			if addr.IP != nil {
+				assigned[addr.IP.String()] = true
+			}
+		}
+	}
+
 	var addresses []string
 	// Find and assign new IP addresses
 	for i := 0; i < numIPs; i++ {
-		ipAddr, err := getUnusedAddress(os.Getenv(EnvDesiredSubnet))
+		newIP, err := getUnusedAddress(desiredSubnets, assigned)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get unused address: %w", err)
 		}
-		slog.Debug("Chosen IP for all runners", "ip", ipAddr)
-
-		// Assign the new IP address
-		subnet := strings.Split(os.Getenv(EnvDesiredSubnet), "/")[1]
-		mask, err := strconv.Atoi(subnet)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert subnet to int: %w", err)
-		}
-		newIP := &net.IPNet{
-			IP:   net.ParseIP(ipAddr),
-			Mask: net.CIDRMask(mask, 32),
-		}
+		ipAddr := newIP.IP.String()
+		assigned[ipAddr] = true
+		slog.Debug("Chosen IP for all runners", "ip", ipAddr, "cidr", newIP.String())
 
 		if err := netlink.AddrAdd(link, &netlink.Addr{IPNet: newIP}); err != nil {
 			return nil, fmt.Errorf("failed to add address: %w", err)
 		}
 
-		slog.Info("Configured divisor interface", "ip", ipAddr)
+		slog.Info("Configured divisor interface", "ip", ipAddr, "cidr", newIP.String())
 		addresses = append(addresses, ipAddr)
 	}
 
@@ -343,7 +356,14 @@ func configureNATRules(addresses []string, dockerAddresses, targetSubnets []stri
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	for _, dockerIP := range dockerAddresses {
-		for _, subnet := range targetSubnets {
+		for _, rawSubnet := range targetSubnets {
+			subnet := strings.TrimSpace(rawSubnet)
+			if subnet == "" {
+				continue
+			}
+			if _, _, err := net.ParseCIDR(subnet); err != nil {
+				return fmt.Errorf("invalid target subnet %q: %w", subnet, err)
+			}
 			ip := addresses[rng.Intn(len(addresses))]
 			err := table.ProgramRule(iptables.Nat, "POSTROUTING", iptables.Insert, []string{"-s", dockerIP, "-d", subnet, "-j", "SNAT", "--to-source", ip, "--random-fully"})
 			if err != nil {
@@ -392,38 +412,121 @@ func getDockerContainerAddresses() ([]string, error) {
 	return dockerAddresses, nil
 }
 
-func getUnusedAddress(desiredSubnet string) (string, error) {
-	// calculate an unused address in the desired subnet
-	_, desiredNet, err := net.ParseCIDR(desiredSubnet)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse desired subnet: %w", err)
+func getDesiredSubnetsEnv() string {
+	if v := strings.TrimSpace(os.Getenv(EnvDesiredSubnets)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv(EnvDesiredSubnet))
+}
+
+func parseDesiredSubnets(raw string) ([]*net.IPNet, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("no desired subnet configured in %s or %s", EnvDesiredSubnet, EnvDesiredSubnets)
 	}
 
-	// calculate how many addresses are in the subnet
+	parts := strings.Split(raw, ",")
+	subnets := make([]*net.IPNet, 0, len(parts))
+	for _, part := range parts {
+		cidr := strings.TrimSpace(part)
+		if cidr == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse desired subnet %q: %w", cidr, err)
+		}
+		ip4 := ipNet.IP.To4()
+		if ip4 == nil || len(ipNet.Mask) != net.IPv4len {
+			return nil, fmt.Errorf("desired subnet %q is not a valid IPv4 CIDR", cidr)
+		}
+		ipNet.IP = ip4.Mask(ipNet.Mask)
+		subnets = append(subnets, ipNet)
+	}
+
+	if len(subnets) == 0 {
+		return nil, fmt.Errorf("no desired subnet configured in %s or %s", EnvDesiredSubnet, EnvDesiredSubnets)
+	}
+	return subnets, nil
+}
+
+func subnetUsableCount(subnet *net.IPNet) int {
+	ones, bits := subnet.Mask.Size()
+	hostBits := bits - ones
+	switch {
+	case hostBits < 0 || hostBits > 30:
+		return 0
+	case hostBits == 0:
+		return 1 // /32 single host
+	case hostBits == 1:
+		return 2 // /31 point-to-point (RFC 3021)
+	default:
+		return (1 << uint(hostBits)) - 2 // exclude network (.0) and broadcast (.255)
+	}
+}
+
+func totalSubnetsCapacity(subnets []*net.IPNet) int {
+	total := 0
+	for _, s := range subnets {
+		total += subnetUsableCount(s)
+	}
+	return total
+}
+
+func pickRandomAddress(subnets []*net.IPNet, rng *rand.Rand) (*net.IPNet, error) {
+	if len(subnets) == 0 {
+		return nil, fmt.Errorf("no desired subnets provided")
+	}
+
+	desiredNet := subnets[rng.Intn(len(subnets))]
 	ones, bits := desiredNet.Mask.Size()
-	numAddresses := 1 << uint(bits-ones)
+	hostBits := bits - ones
+	if hostBits < 0 || hostBits > 30 {
+		return nil, fmt.Errorf("unsupported prefix length /%d in subnet %s", ones, desiredNet.String())
+	}
 
-	// randomly pick a number between 0 and numAddresses as n
-	// pick the nth address in the subnet
+	baseIP := binary.BigEndian.Uint32(desiredNet.IP.To4())
+	var offset uint32
+	switch {
+	case hostBits == 0:
+		offset = 0
+	case hostBits == 1:
+		offset = uint32(rng.Intn(2))
+	default:
+		numUsable := (1 << uint(hostBits)) - 2
+		offset = 1 + uint32(rng.Intn(numUsable))
+	}
 
-	for {
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-		n := rng.Intn(numAddresses - 1)
-		address := net.IP(make([]byte, 4))
-		copy(address, desiredNet.IP)
-		for i := 0; i < n; i++ {
-			for j := 3; j >= 0; j-- {
-				address[j]++
-				if address[j] != 0 {
-					break
-				}
-			}
+	addrBytes := make(net.IP, net.IPv4len)
+	binary.BigEndian.PutUint32(addrBytes, baseIP+offset)
+
+	maskCopy := make(net.IPMask, len(desiredNet.Mask))
+	copy(maskCopy, desiredNet.Mask)
+
+	return &net.IPNet{
+		IP:   addrBytes,
+		Mask: maskCopy,
+	}, nil
+}
+
+const maxAddressSearchAttempts = 128
+
+func getUnusedAddress(subnets []*net.IPNet, assigned map[string]bool) (*net.IPNet, error) {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	for attempt := 0; attempt < maxAddressSearchAttempts; attempt++ {
+		candidate, err := pickRandomAddress(subnets, rng)
+		if err != nil {
+			return nil, err
+		}
+		ipStr := candidate.IP.String()
+		if assigned[ipStr] {
+			continue
 		}
 
 		// ping the address to see if it's in use
-		pinger, err := probing.NewPinger(address.String())
+		pinger, err := probing.NewPinger(ipStr)
 		if err != nil {
-			return "", fmt.Errorf("failed to create pinger: %w", err)
+			return nil, fmt.Errorf("failed to create pinger: %w", err)
 		}
 
 		pinger.Count = 1
@@ -431,11 +534,13 @@ func getUnusedAddress(desiredSubnet string) (string, error) {
 		pinger.SetPrivileged(true)
 		err = pinger.Run()
 		if err != nil {
-			return "", fmt.Errorf("failed to run pinger: %w", err)
+			return nil, fmt.Errorf("failed to run pinger: %w", err)
 		}
 
 		if pinger.Statistics().PacketsRecv == 0 {
-			return address.String(), nil
+			return candidate, nil
 		}
 	}
+
+	return nil, fmt.Errorf("unable to find an unused IP address after %d attempts", maxAddressSearchAttempts)
 }
