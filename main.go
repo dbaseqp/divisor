@@ -54,7 +54,31 @@ const (
 	ModeSNAT = "snat"
 	// ModeDirect is the mode of operation that sets the IP of a runner directly
 	ModeDirect = "direct"
+
+	// ipv4ConfDir is the sysctl directory of per-interface promote_secondaries files.
+	ipv4ConfDir = "/proc/sys/net/ipv4/conf"
 )
+
+// promoteSecondariesEnabled reports whether confDir/<iface>/promote_secondaries
+// is 1. The read is confined to confDir. A name containing "/" or ".." is an
+// error, including when the extra components would stay inside confDir. A
+// missing file is not an error and reports false, matching the previous check.
+func promoteSecondariesEnabled(confDir, iface string) (bool, error) {
+	if strings.Contains(iface, "/") || strings.Contains(iface, "..") {
+		return false, fmt.Errorf("interface name %q escapes %s", iface, confDir)
+	}
+	root, err := os.OpenRoot(confDir)
+	if err != nil {
+		return false, fmt.Errorf("open %s: %w", confDir, err)
+	}
+	defer root.Close()
+
+	data, err := root.ReadFile(iface + "/promote_secondaries")
+	if err != nil {
+		return false, nil
+	}
+	return strings.TrimSpace(string(data)) == "1", nil
+}
 
 var logLvels = map[string]slog.Level{
 	"debug": slog.LevelDebug,
@@ -96,13 +120,19 @@ func main() {
 	// In direct mode nothing else configures the interface, so do it on startup
 	if os.Getenv(EnvMode) == ModeDirect {
 		// New addresses are added before the old ones are removed, so
-		// without promote_secondaries we'd lose the new address as well
-		promote_set := func(iface string) bool {
-			v, err := os.ReadFile("/proc/sys/net/ipv4/conf/" + iface + "/promote_secondaries")
-			return err == nil && strings.TrimSpace(string(v)) == "1"
+		// without promote_secondaries we'd lose the new address as well.
+		// A bad INTERFACE_NAME is rejected even when "all" is already 1.
+		iface := os.Getenv(EnvInterfaceName)
+		allSet, err := promoteSecondariesEnabled(ipv4ConfDir, "all")
+		if err != nil {
+			log.Fatalf("direct mode: %s", err)
 		}
-		if !promote_set("all") && !promote_set(os.Getenv(EnvInterfaceName)) {
-			log.Fatalf("net.ipv4.conf.%s.promote_secondaries must be 1 in direct mode", os.Getenv(EnvInterfaceName))
+		ifaceSet, err := promoteSecondariesEnabled(ipv4ConfDir, iface)
+		if err != nil {
+			log.Fatalf("direct mode: %s", err)
+		}
+		if !allSet && !ifaceSet {
+			log.Fatalf("net.ipv4.conf.%s.promote_secondaries must be 1 in direct mode", iface)
 		}
 		if err := handleNetworkReconfiguration(); err != nil {
 			log.Fatalf("Initial network configuration failed: %s", err)
