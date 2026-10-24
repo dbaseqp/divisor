@@ -171,13 +171,22 @@ func handleNetworkReconfiguration() error {
 		return fmt.Errorf("failed to convert NUM_IPS to int: %w", err)
 	}
 
+	// Reject a bad target list before the interface is edited. Otherwise a
+	// typo rotates addresses and, in SNAT mode, deletes existing NAT rules.
+	targetSubnets := strings.Split(os.Getenv(EnvTargetSubnets), ",")
+	if os.Getenv(EnvMode) == ModeDirect {
+		if _, err := parseRouteDestinations(targetSubnets); err != nil {
+			return fmt.Errorf("failed to configure routes: %w", err)
+		}
+	} else if _, err := normalizeSNATSubnets(targetSubnets); err != nil {
+		return fmt.Errorf("failed to configure NAT rules: %w", err)
+	}
+
 	// Configure divisor interface with the chosen IP
 	addresses, err := configureDivisorInterface(numIPs)
 	if err != nil {
 		return fmt.Errorf("failed to configure divisor interface: %w", err)
 	}
-
-	targetSubnets := strings.Split(os.Getenv(EnvTargetSubnets), ",")
 
 	if os.Getenv(EnvMode) == ModeDirect {
 		if err := configureRoutes(targetSubnets); err != nil {
@@ -212,12 +221,13 @@ func configureRoutes(targetSubnets []string) error {
 		return fmt.Errorf("failed to get link %s by name: %w", interfaceName, err)
 	}
 
+	destinations, err := parseRouteDestinations(targetSubnets)
+	if err != nil {
+		return err
+	}
+
 	gateway := net.ParseIP(os.Getenv(EnvTargetSubnetGateway))
-	for _, subnet := range targetSubnets {
-		_, dst, err := net.ParseCIDR(strings.TrimSpace(subnet))
-		if err != nil {
-			return fmt.Errorf("failed to parse target subnet %q: %w", subnet, err)
-		}
+	for _, dst := range destinations {
 		route := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst}
 		if gateway != nil {
 			route.Gw = gateway
@@ -234,6 +244,22 @@ func configureRoutes(targetSubnets []string) error {
 
 // configureDivisorInterface configures the divisor interface with the number of IPs specified
 func configureDivisorInterface(numIPs int) ([]string, error) {
+	if numIPs < 1 {
+		return nil, fmt.Errorf("NUM_IPS must be positive, got %d", numIPs)
+	}
+
+	// Parse and size the pool before creating or editing the interface.
+	// SNAT mode removes current addresses, so a bad NUM_IPS used to wipe
+	// them and then fail.
+	desiredSubnets, err := parseDesiredSubnets(getDesiredSubnetsEnv())
+	if err != nil {
+		return nil, err
+	}
+	totalCapacity := totalSubnetsCapacity(desiredSubnets)
+	if numIPs > totalCapacity {
+		return nil, fmt.Errorf("requested NUM_IPS (%d) exceeds total usable addresses (%d) in DESIRED_SUBNET", numIPs, totalCapacity)
+	}
+
 	interfaceName := os.Getenv(EnvInterfaceName)
 	if interfaceName == "" {
 		interfaceName = DefaultInterfaceName
@@ -281,16 +307,6 @@ func configureDivisorInterface(numIPs int) ([]string, error) {
 		}
 	}
 
-	desiredSubnets, err := parseDesiredSubnets(getDesiredSubnetsEnv())
-	if err != nil {
-		return nil, err
-	}
-
-	totalCapacity := totalSubnetsCapacity(desiredSubnets)
-	if numIPs > totalCapacity {
-		return nil, fmt.Errorf("requested NUM_IPS (%d) exceeds total usable addresses (%d) in DESIRED_SUBNET", numIPs, totalCapacity)
-	}
-
 	assigned := make(map[string]bool, len(addrs)+numIPs)
 	if direct {
 		for _, addr := range addrs {
@@ -335,6 +351,16 @@ func configureDivisorInterface(numIPs int) ([]string, error) {
 }
 
 func configureNATRules(addresses []string, dockerAddresses, targetSubnets []string) error {
+	normalizedSubnets, err := normalizeSNATSubnets(targetSubnets)
+	if err != nil {
+		return err
+	}
+	// Indexing an empty address list panics. Skip the check when there is
+	// nothing to install; a round with no runners still clears old SNAT rules.
+	if len(normalizedSubnets) > 0 && len(dockerAddresses) > 0 && len(addresses) == 0 {
+		return fmt.Errorf("no source addresses available for SNAT")
+	}
+
 	// Clear existing SNAT rules
 	table := iptables.GetIptable(iptables.IPv4)
 	output, err := table.Raw("-t", "nat", "-S", "POSTROUTING")
@@ -355,26 +381,51 @@ func configureNATRules(addresses []string, dockerAddresses, targetSubnets []stri
 	// Add new SNAT rules for each target subnet and Docker address
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
+	installed := 0
 	for _, dockerIP := range dockerAddresses {
-		for _, rawSubnet := range targetSubnets {
-			subnet := strings.TrimSpace(rawSubnet)
-			if subnet == "" {
-				continue
-			}
-			if _, _, err := net.ParseCIDR(subnet); err != nil {
-				return fmt.Errorf("invalid target subnet %q: %w", subnet, err)
-			}
+		for _, subnet := range normalizedSubnets {
 			ip := addresses[rng.Intn(len(addresses))]
 			err := table.ProgramRule(iptables.Nat, "POSTROUTING", iptables.Insert, []string{"-s", dockerIP, "-d", subnet, "-j", "SNAT", "--to-source", ip, "--random-fully"})
 			if err != nil {
 				return fmt.Errorf("failed to add SNAT rule for Docker IP %s and subnet %s: %w", dockerIP, subnet, err)
 			}
+			installed++
 			slog.Debug("Added SNAT rule", "dockerIP", dockerIP, "subnet", subnet, "ip", ip)
 		}
 	}
 
-	slog.Info("Configured NAT rules", "num_rules", len(addresses))
+	slog.Info("Configured NAT rules", "num_rules", installed)
 	return nil
+}
+
+// normalizeSNATSubnets trims entries and drops blanks. An invalid CIDR is an
+// error. Direct mode uses parseRouteDestinations, which rejects blanks.
+func normalizeSNATSubnets(targetSubnets []string) ([]string, error) {
+	normalized := make([]string, 0, len(targetSubnets))
+	for _, rawSubnet := range targetSubnets {
+		subnet := strings.TrimSpace(rawSubnet)
+		if subnet == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(subnet); err != nil {
+			return nil, fmt.Errorf("invalid target subnet %q: %w", subnet, err)
+		}
+		normalized = append(normalized, subnet)
+	}
+	return normalized, nil
+}
+
+// parseRouteDestinations parses every target subnet. A blank entry is an error.
+func parseRouteDestinations(targetSubnets []string) ([]*net.IPNet, error) {
+	destinations := make([]*net.IPNet, 0, len(targetSubnets))
+	for _, subnet := range targetSubnets {
+		_, dst, err := net.ParseCIDR(strings.TrimSpace(subnet))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse target subnet %q: %w", subnet, err)
+		}
+		destinations = append(destinations, dst)
+	}
+	return destinations, nil
 }
 
 func getDockerContainerAddresses() ([]string, error) {
