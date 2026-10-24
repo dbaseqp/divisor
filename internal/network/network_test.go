@@ -1,8 +1,10 @@
-package main
+package network
 
 import (
 	"strings"
 	"testing"
+
+	"divisor/internal/config"
 )
 
 func TestNormalizeSNATSubnets(t *testing.T) {
@@ -121,15 +123,29 @@ func TestConfigureNATRules_RejectsBadInputBeforeIptables(t *testing.T) {
 	})
 }
 
-func TestHandleNetworkReconfiguration_ValidatesBeforeNetworkChanges(t *testing.T) {
+func TestReconfigure_RejectsNonNumericNumIPs(t *testing.T) {
+	t.Setenv(config.EnvNumIPs, "many")
+	t.Setenv(config.EnvDesiredSubnet, "192.0.2.0/24")
+	t.Setenv(config.EnvDesiredSubnets, "")
+	t.Setenv(config.EnvTargetSubnets, "10.0.0.0/8")
+	t.Setenv(config.EnvMode, config.ModeSNAT)
+	t.Setenv(config.EnvInterfaceName, "divisor-test-unused")
+
+	err := Reconfigure()
+	if err == nil || !strings.Contains(err.Error(), "NUM_IPS") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestReconfigure_ValidatesBeforeNetworkChanges(t *testing.T) {
 	base := map[string]string{
-		EnvNumIPs:              "1",
-		EnvDesiredSubnet:       "192.0.2.0/24",
-		EnvDesiredSubnets:      "",
-		EnvTargetSubnets:       "10.0.0.0/8",
-		EnvMode:                ModeSNAT,
-		EnvInterfaceName:       "divisor-test-unused",
-		EnvTargetSubnetGateway: "",
+		config.EnvNumIPs:              "1",
+		config.EnvDesiredSubnet:       "192.0.2.0/24",
+		config.EnvDesiredSubnets:      "",
+		config.EnvTargetSubnets:       "10.0.0.0/8",
+		config.EnvMode:                config.ModeSNAT,
+		config.EnvInterfaceName:       "divisor-test-unused",
+		config.EnvTargetSubnetGateway: "",
 	}
 	cases := []struct {
 		name string
@@ -138,56 +154,56 @@ func TestHandleNetworkReconfiguration_ValidatesBeforeNetworkChanges(t *testing.T
 	}{
 		{
 			name: "zero ips",
-			env:  map[string]string{EnvNumIPs: "0"},
+			env:  map[string]string{config.EnvNumIPs: "0"},
 			want: "positive",
 		},
 		{
 			name: "negative ips",
-			env:  map[string]string{EnvNumIPs: "-2"},
+			env:  map[string]string{config.EnvNumIPs: "-2"},
 			want: "positive",
 		},
 		{
 			name: "snat trailing comma still rejects zero ips",
 			env: map[string]string{
-				EnvNumIPs:        "0",
-				EnvTargetSubnets: "10.0.0.0/8, ",
+				config.EnvNumIPs:        "0",
+				config.EnvTargetSubnets: "10.0.0.0/8, ",
 			},
 			want: "positive",
 		},
 		{
 			name: "exceeds capacity",
 			env: map[string]string{
-				EnvNumIPs:        "3",
-				EnvDesiredSubnet: "192.0.2.0/30",
+				config.EnvNumIPs:        "3",
+				config.EnvDesiredSubnet: "192.0.2.0/30",
 			},
 			want: "exceeds total usable",
 		},
 		{
 			name: "invalid desired subnet",
-			env:  map[string]string{EnvDesiredSubnet: "not-a-cidr"},
+			env:  map[string]string{config.EnvDesiredSubnet: "not-a-cidr"},
 			want: "not-a-cidr",
 		},
 		{
 			name: "invalid snat target",
 			env: map[string]string{
-				EnvMode:          ModeSNAT,
-				EnvTargetSubnets: "nope",
+				config.EnvMode:          config.ModeSNAT,
+				config.EnvTargetSubnets: "nope",
 			},
 			want: "nope",
 		},
 		{
 			name: "invalid direct target",
 			env: map[string]string{
-				EnvMode:          ModeDirect,
-				EnvTargetSubnets: "nope",
+				config.EnvMode:          config.ModeDirect,
+				config.EnvTargetSubnets: "nope",
 			},
 			want: "nope",
 		},
 		{
 			name: "direct blank target",
 			env: map[string]string{
-				EnvMode:          ModeDirect,
-				EnvTargetSubnets: "10.0.0.0/8, ",
+				config.EnvMode:          config.ModeDirect,
+				config.EnvTargetSubnets: "10.0.0.0/8, ",
 			},
 			want: "failed to parse target subnet",
 		},
@@ -202,7 +218,7 @@ func TestHandleNetworkReconfiguration_ValidatesBeforeNetworkChanges(t *testing.T
 				t.Setenv(key, value)
 			}
 
-			err := handleNetworkReconfiguration()
+			err := Reconfigure()
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want error containing %q", err, tc.want)
 			}

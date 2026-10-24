@@ -5,7 +5,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -o divisor .
+RUN go build -o divisor ./cmd/divisor
 
 FROM alpine:3.21
 RUN apk add --no-cache \
