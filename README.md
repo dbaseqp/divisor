@@ -54,7 +54,7 @@ Add these variables to your `.env` file:
 
 ```bash
 # Divisor Configuration
-REDIS_ADDR=quotient_redis:6379
+REDIS_ADDR=quotient-redis:6379
 REDIS_PASSWORD=your_redis_password
 NUM_IPS=5
 DESIRED_SUBNET=10.192.0.0/10
@@ -68,7 +68,7 @@ CONTAINER_PREFIX=quotient-runner
 If your competition infrastructure or source IP ranges span multiple subnets:
 
 ```bash
-REDIS_ADDR=quotient_redis:6379
+REDIS_ADDR=quotient-redis:6379
 REDIS_PASSWORD=your_redis_password
 NUM_IPS=10
 DESIRED_SUBNET=10.192.0.0/16,192.168.200.0/24
@@ -321,7 +321,7 @@ docker logs quotient-divisor-1 2>&1 | grep -i redis
 
 **Check for round_finish events:**
 ```bash
-docker exec quotient_redis redis-cli -a $REDIS_PASSWORD SUBSCRIBE events
+docker exec quotient-redis redis-cli -a $REDIS_PASSWORD SUBSCRIBE events
 # Start a scoring round and verify events are published
 ```
 
