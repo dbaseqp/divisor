@@ -57,7 +57,7 @@ func Reconfigure() error {
 	}
 
 	// Configure divisor interface with the chosen IP
-	addresses, err := configureDivisorInterface(cfg, numIPs)
+	addresses, removeOld, err := configureDivisorInterface(cfg, numIPs)
 	if err != nil {
 		return fmt.Errorf("failed to configure divisor interface: %w", err)
 	}
@@ -80,9 +80,22 @@ func Reconfigure() error {
 		return fmt.Errorf("failed to configure NAT rules: %w", err)
 	}
 
+	// The old addresses go last: SYNs sent from them just before the switch
+	// still get their answers. Only connections older than rotationDrain
+	// that are still open lose their address.
+	time.Sleep(rotationDrain)
+	if err := removeOld(); err != nil {
+		return fmt.Errorf("failed to configure divisor interface: %w", err)
+	}
+
 	slog.Info("Finished reconfiguring network")
 	return nil
 }
+
+// rotationDrain is how long SNAT mode keeps the previous addresses after the
+// NAT rules point at the new ones: long enough for a connection whose SYN
+// left from an old address just before the switch to finish its handshake.
+var rotationDrain = 2 * time.Second
 
 // configureRoutes routes the target subnets out the divisor interface.
 func configureRoutes(cfg config.Config, targetSubnets []string) error {
@@ -113,10 +126,19 @@ func configureRoutes(cfg config.Config, targetSubnets []string) error {
 	return nil
 }
 
-// configureDivisorInterface configures the divisor interface with the number of IPs specified.
-func configureDivisorInterface(cfg config.Config, numIPs int) ([]string, error) {
+// configureDivisorInterface configures the divisor interface with the number
+// of IPs specified. The new addresses are added before the old ones are
+// removed. Direct mode removes the old ones before returning. SNAT mode
+// returns their removal for Reconfigure to run once the NAT rules point at the
+// new addresses, so a connection opened during a rotation never leaves from
+// an address that is gone: that needs promote_secondaries on the interface
+// (otherwise removing the old primary address drops the new ones too), which
+// SNAT mode sets on its own interface. If it can't, the old addresses are
+// removed first, as before.
+func configureDivisorInterface(cfg config.Config, numIPs int) ([]string, func() error, error) {
+	noop := func() error { return nil }
 	if numIPs < 1 {
-		return nil, fmt.Errorf("NUM_IPS must be positive, got %d", numIPs)
+		return nil, noop, fmt.Errorf("NUM_IPS must be positive, got %d", numIPs)
 	}
 
 	// Parse and size the pool before creating or editing the interface.
@@ -124,11 +146,11 @@ func configureDivisorInterface(cfg config.Config, numIPs int) ([]string, error) 
 	// them and then fail.
 	desiredSubnets, err := ippool.ParseDesiredSubnets(cfg.DesiredSubnets)
 	if err != nil {
-		return nil, err
+		return nil, noop, err
 	}
 	totalCapacity := ippool.TotalSubnetsCapacity(desiredSubnets)
 	if numIPs > totalCapacity {
-		return nil, fmt.Errorf("requested NUM_IPS (%d) exceeds total usable addresses (%d) in DESIRED_SUBNET", numIPs, totalCapacity)
+		return nil, noop, fmt.Errorf("requested NUM_IPS (%d) exceeds total usable addresses (%d) in DESIRED_SUBNET", numIPs, totalCapacity)
 	}
 
 	interfaceName := cfg.InterfaceNameOrDefault()
@@ -144,19 +166,19 @@ func configureDivisorInterface(cfg config.Config, numIPs int) ([]string, error) 
 		}
 
 		if err := netlink.LinkAdd(iface); err != nil {
-			return nil, fmt.Errorf("failed to add link: %w", err)
+			return nil, noop, fmt.Errorf("failed to add link: %w", err)
 		}
 
 		link, err = netlink.LinkByName(interfaceName)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get link %s by name: %w", interfaceName, err)
+			return nil, noop, fmt.Errorf("failed to get link %s by name: %w", interfaceName, err)
 		}
 	}
 
 	// Remove any existing addresses
 	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list addresses: %w", err)
+		return nil, noop, fmt.Errorf("failed to list addresses: %w", err)
 	}
 	removeOld := func() error {
 		for _, addr := range addrs {
@@ -167,16 +189,21 @@ func configureDivisorInterface(cfg config.Config, numIPs int) ([]string, error) 
 		return nil
 	}
 
-	// SNAT mode deletes adding to avoid requiring promote_secondaries
 	direct := cfg.Mode == config.ModeDirect
+	makeBeforeBreak := direct
 	if !direct {
-		if err := removeOld(); err != nil {
-			return nil, err
+		if err := setPromoteSecondaries(interfaceName); err != nil {
+			slog.Warn("Removing old addresses before adding new ones: connections opened during the rotation can hang", "error", err)
+			if err := removeOld(); err != nil {
+				return nil, noop, err
+			}
+		} else {
+			makeBeforeBreak = true
 		}
 	}
 
 	assigned := make(map[string]bool, len(addrs)+numIPs)
-	if direct {
+	if makeBeforeBreak {
 		for _, addr := range addrs {
 			if addr.IP != nil {
 				assigned[addr.IP.String()] = true
@@ -189,14 +216,14 @@ func configureDivisorInterface(cfg config.Config, numIPs int) ([]string, error) 
 	for i := 0; i < numIPs; i++ {
 		newIP, err := ippool.GetUnusedAddress(desiredSubnets, assigned)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get unused address: %w", err)
+			return nil, noop, fmt.Errorf("failed to get unused address: %w", err)
 		}
 		ipAddr := newIP.IP.String()
 		assigned[ipAddr] = true
 		slog.Debug("Chosen IP for all runners", "ip", ipAddr, "cidr", newIP.String())
 
 		if err := netlink.AddrAdd(link, &netlink.Addr{IPNet: newIP}); err != nil {
-			return nil, fmt.Errorf("failed to add address: %w", err)
+			return nil, noop, fmt.Errorf("failed to add address: %w", err)
 		}
 
 		slog.Info("Configured divisor interface", "ip", ipAddr, "cidr", newIP.String())
@@ -206,16 +233,26 @@ func configureDivisorInterface(cfg config.Config, numIPs int) ([]string, error) 
 	// Direct mode adds before deleting to avoid temporarily dropping the routes
 	if direct {
 		if err := removeOld(); err != nil {
-			return nil, err
+			return nil, noop, err
 		}
 	}
 
 	// Bring the interface up
 	if err := netlink.LinkSetUp(link); err != nil {
-		return nil, fmt.Errorf("failed to set link up: %w", err)
+		return nil, noop, fmt.Errorf("failed to set link up: %w", err)
 	}
 
-	return addresses, nil
+	if makeBeforeBreak && !direct {
+		return addresses, removeOld, nil
+	}
+	return addresses, noop, nil
+}
+
+// setPromoteSecondaries turns on net.ipv4.conf.<iface>.promote_secondaries,
+// so removing the interface's primary address keeps its other addresses.
+// It only touches the interface Divisor rotates.
+func setPromoteSecondaries(iface string) error {
+	return os.WriteFile("/proc/sys/net/ipv4/conf/"+iface+"/promote_secondaries", []byte("1"), 0o644)
 }
 
 func configureNATRules(addresses []string, dockerAddresses, targetSubnets []string) error {
@@ -229,24 +266,24 @@ func configureNATRules(addresses []string, dockerAddresses, targetSubnets []stri
 		return fmt.Errorf("no source addresses available for SNAT")
 	}
 
-	// Clear existing SNAT rules
-	table := iptables.GetIptable(iptables.IPv4)
+	// Note the existing SNAT rules, but delete them only after the new ones
+	// are in: a connection opened between the two steps would otherwise
+	// match no SNAT rule, leave with the runner's own address and hang.
+	table := natTable()
 	output, err := table.Raw("-t", "nat", "-S", "POSTROUTING")
 	if err != nil {
 		return fmt.Errorf("failed to list rules: %w", err)
 	}
-	rules := strings.Split(string(output), "\n")
-	for _, rule := range rules {
+	var oldRules []string
+	for _, rule := range strings.Split(string(output), "\n") {
 		if strings.Contains(rule, "-j SNAT") {
-			deleteRule := "-t nat " + strings.Replace(rule, "-A", "-D", 1)
-			_, err := table.Raw(strings.Fields(deleteRule)...)
-			if err != nil {
-				slog.Warn("Error deleting rule", "rule", rule, "error", err)
-			}
+			oldRules = append(oldRules, rule)
 		}
 	}
 
-	// Add new SNAT rules for each target subnet and Docker address
+	// Add new SNAT rules for each target subnet and Docker address. They are
+	// inserted at the top of POSTROUTING, so new connections match them
+	// before any old rule.
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	installed := 0
@@ -262,9 +299,28 @@ func configureNATRules(addresses []string, dockerAddresses, targetSubnets []stri
 		}
 	}
 
+	// Then clear the old ones. iptables -D removes the first rule that
+	// matches, so an old rule identical to a new one leaves one copy in place,
+	// which is the same rule.
+	for _, rule := range oldRules {
+		deleteRule := "-t nat " + strings.Replace(rule, "-A", "-D", 1)
+		if _, err := table.Raw(strings.Fields(deleteRule)...); err != nil {
+			slog.Warn("Error deleting rule", "rule", rule, "error", err)
+		}
+	}
+
 	slog.Info("Configured NAT rules", "num_rules", installed)
 	return nil
 }
+
+// ruleTable is the part of the iptables API configureNATRules uses.
+type ruleTable interface {
+	Raw(args ...string) ([]byte, error)
+	ProgramRule(table iptables.Table, chain string, action iptables.Action, args []string) error
+}
+
+// natTable returns the IPv4 iptables. Tests replace it.
+var natTable = func() ruleTable { return iptables.GetIptable(iptables.IPv4) }
 
 // normalizeSNATSubnets trims entries and drops blanks. An invalid CIDR is an
 // error. Direct mode uses parseRouteDestinations, which rejects blanks.
