@@ -215,8 +215,11 @@ Build with `go build -o divisor ./cmd/divisor`.
 
 1. Quotient signals the end of a scoring round. Redis mode uses the payload `round_finish`. NATS mode uses one JSON message, `{"round_id": "<uuid>", "closed_at": "<RFC3339>"}`, published once when the round reaches completed.
 2. Divisor receives the event and triggers reconfiguration
-3. New random IPs are selected and assigned to the interface
-4. NAT rules are updated for all runner containers
+3. New random IPs are selected and added to the interface, next to the current ones
+4. NAT rules for the new IPs are inserted for all runner containers, then the old rules are deleted
+5. In SNAT mode, the previous IPs are removed 2 seconds later
+
+A connection opened during a rotation therefore always matches a SNAT rule whose address is on the interface, and connections whose SYN left from an old address just before the switch still get their answers. Keeping the new addresses when the old primary address is removed needs `promote_secondaries` on the interface, which SNAT mode sets on `INTERFACE_NAME`; if it can't, Divisor removes the old addresses first, as before, and logs a warning.
 
 ### NAT Rule Configuration
 
